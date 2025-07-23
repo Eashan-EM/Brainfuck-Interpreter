@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::{Read, stdin};
 
 #[derive(Debug)]
 enum InstUnits {
@@ -9,13 +10,15 @@ enum InstUnits {
   InstPrevCell,
   InstPrint,
   InstInput,
-  InstLoopStart,
-  InstLoopEnd,
-  InstRepeat(u8)
+  InstLoopStart(usize),
+  InstLoopEnd(usize),
+  InstRepeat(usize)
 }
 
 fn validate_code(file_contents: String) -> Result<Vec<InstUnits>, String> {
   let mut instructions: Vec<InstUnits> = vec![];
+  let mut loop_nesting: Vec<usize> = vec![];
+  let mut value: usize;
   let mut nesting = 0;
   for ch in file_contents.chars() {
     match ch {
@@ -26,14 +29,17 @@ fn validate_code(file_contents: String) -> Result<Vec<InstUnits>, String> {
       '.' => instructions.push(InstUnits::InstPrint),
       ',' => instructions.push(InstUnits::InstInput),
       '[' => {
-        instructions.push(InstUnits::InstLoopStart);
+        instructions.push(InstUnits::InstLoopStart(0));
+        loop_nesting.push(instructions.len()-1);
         nesting += 1;
       },
       ']' => {
-        instructions.push(InstUnits::InstLoopEnd);
         if nesting==0 {
           return Err("Found closing bracket with no opening bracket to match".to_string());
         }
+        value = loop_nesting.pop().expect("Loop ended unexpectedly");
+        instructions[value] = InstUnits::InstLoopStart(instructions.len()-1);
+        instructions.push(InstUnits::InstLoopEnd(value));
         nesting -= 1;
       },
       _   => {}
@@ -47,17 +53,33 @@ fn validate_code(file_contents: String) -> Result<Vec<InstUnits>, String> {
 
 fn cell_increment(cell_pointer: isize, before_cells: &mut Vec<u8>, after_cells: &mut Vec<u8>) {
   if cell_pointer>=0 {
-    after_cells[cell_pointer as usize] = (((after_cells[cell_pointer as usize]+1) as i16)%256) as u8;
+    if after_cells[cell_pointer as usize]==255 {
+      after_cells[cell_pointer as usize] = 0;
+    } else {
+      after_cells[cell_pointer as usize] += 1;
+    }
   } else {
-    before_cells[(-cell_pointer -1) as usize] = (((before_cells[(-cell_pointer -1) as usize]+1) as i16)%256) as u8;
+    if before_cells[(-cell_pointer -1) as usize]==255 {
+      before_cells[(-cell_pointer -1) as usize] = 0;
+    } else {
+      before_cells[(-cell_pointer -1) as usize] -= 1;
+    }
   }
 }
 
 fn cell_decrement(cell_pointer: isize, before_cells: &mut Vec<u8>, after_cells: &mut Vec<u8>) {
   if cell_pointer>=0 {
-    after_cells[cell_pointer as usize] = (((after_cells[cell_pointer as usize]-1) as i16)%256) as u8;
+    if after_cells[cell_pointer as usize]==0 {
+      after_cells[cell_pointer as usize] = 255;
+    } else {
+      after_cells[cell_pointer as usize] -= 1;
+    }
   } else {
-    before_cells[(-cell_pointer -1) as usize] = (((before_cells[(-cell_pointer -1) as usize]-1) as i16)%256) as u8;
+    if before_cells[(-cell_pointer -1) as usize]==0 {
+      before_cells[(-cell_pointer -1) as usize] = 255;
+    } else {
+      before_cells[(-cell_pointer -1) as usize] -= 1;
+    }
   }
 }
 
@@ -84,10 +106,12 @@ fn cell_print(cell_pointer: isize, before_cells: &mut Vec<u8>, after_cells: &mut
 }
 
 fn cell_input(cell_pointer: isize, before_cells: &mut Vec<u8>, after_cells: &mut Vec<u8>) {
+  let mut buf: [u8; 1] = [0];
+  stdin().read_exact(&mut buf).unwrap();
   if cell_pointer>=0 {
-    after_cells[cell_pointer as usize] = after_cells[cell_pointer as usize]-1;
+    after_cells[cell_pointer as usize] = buf[0];
   } else {
-    before_cells[(-cell_pointer -1) as usize] = before_cells[(-cell_pointer -1) as usize]-1;
+    before_cells[(-cell_pointer -1) as usize] = buf[0];
   }
 }
 
@@ -99,27 +123,29 @@ fn cell_value(cell_pointer: isize, before_cells: &mut Vec<u8>, after_cells: &mut
   }
 }
 
-fn execute(loop_start: isize, cell_ptr: isize, inst: &Vec<InstUnits>, before_cells: &mut Vec<u8>, after_cells: &mut Vec<u8>) -> isize {
-  let mut inst_pointer: isize = loop_start;
-  let mut cell_pointer: isize = cell_ptr;
+fn execute(inst: &Vec<InstUnits>, before_cells: &mut Vec<u8>, after_cells: &mut Vec<u8>) -> isize {
+  let mut inst_pointer: usize = 0;
+  let mut cell_pointer: isize = 0;
 
   while inst_pointer<inst.len().try_into().unwrap() {
     //println!("{:?}", inst[inst_pointer as usize]);
     //println!("{:?}", after_cells);
-    match inst[inst_pointer as usize] {
-      InstUnits::InstRepeat(_times) => {},
+    match inst[inst_pointer] {
+      InstUnits::InstRepeat(times) => {},
       InstUnits::InstIncrement => cell_increment(cell_pointer, before_cells, after_cells),
       InstUnits::InstDecrement => cell_decrement(cell_pointer, before_cells, after_cells),
       InstUnits::InstNextCell => cell_next(&mut cell_pointer, after_cells),
       InstUnits::InstPrevCell => cell_prev(&mut cell_pointer, before_cells),
       InstUnits::InstPrint => cell_print(cell_pointer, before_cells, after_cells),
       InstUnits::InstInput => cell_input(cell_pointer, before_cells, after_cells),
-      InstUnits::InstLoopStart => inst_pointer = execute(inst_pointer+1, cell_pointer, inst, before_cells, after_cells),
-      InstUnits::InstLoopEnd => {
+      InstUnits::InstLoopStart(goto) => {
         if cell_value(cell_pointer, before_cells, after_cells)==0 {
-          return inst_pointer;
-        } else {
-          inst_pointer = loop_start-1;
+          inst_pointer = goto; 
+        }
+      },
+      InstUnits::InstLoopEnd(goto) => {
+        if cell_value(cell_pointer, before_cells, after_cells)!=0 {
+          inst_pointer = goto;
         }
       }
     } 
@@ -137,5 +163,5 @@ fn main() {
 
   let mut before_cells: Vec<u8> = vec![];
   let mut after_cells: Vec<u8> = vec![0];
-  execute(0, 0, &instructions, &mut before_cells, &mut after_cells);
+  execute(&instructions, &mut before_cells, &mut after_cells);
 }
